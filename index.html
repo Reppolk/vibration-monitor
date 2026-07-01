@@ -12,7 +12,7 @@
         .hide { display: none !important; }
     </style>
 </head>
-<body class="min-h-screen flex flex-col items-center p-4 sm:p-6">
+<body class="min-h-screen flex flex-col items-center p-4 sm:p-6 pb-20">
 
     <!-- Header -->
     <header class="w-full max-w-md text-center mb-6">
@@ -29,15 +29,21 @@
     <!-- Main Dashboard -->
     <main class="w-full max-w-md flex flex-col gap-4">
         
-        <!-- Status & A(8) Estimate -->
+        <!-- Status & Timer Estimate -->
         <div class="glass-panel p-5 rounded-2xl flex flex-col items-center justify-center relative overflow-hidden">
             <div id="statusIndicator" class="absolute top-3 right-3 w-3 h-3 rounded-full bg-red-500 shadow-[0_0_8px_#ef4444]"></div>
+            
+            <div class="flex w-full justify-between items-center mb-4 border-b border-slate-700 pb-2">
+                <span class="text-slate-400 text-xs font-semibold uppercase">Rec Time:</span>
+                <span id="timerDisplay" class="text-lg font-mono font-bold text-blue-400">00:00.0</span>
+            </div>
+
             <span class="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-1">Highest Axis A(8) Estimate</span>
             <div class="flex items-baseline gap-1">
                 <span id="a8Value" class="text-5xl font-extrabold text-white">0.000</span>
                 <span class="text-lg text-slate-400 font-medium">m/s²</span>
             </div>
-            <span id="dominantAxis" class="text-blue-400 text-sm mt-2 font-medium">Monitoring Paused</span>
+            <span id="dominantAxis" class="text-blue-400 text-sm mt-2 font-medium">Monitoring Stopped</span>
         </div>
 
         <!-- Live RMS Values -->
@@ -61,28 +67,50 @@
             <canvas id="vibChart"></canvas>
         </div>
 
-        <!-- Controls -->
-        <div class="grid grid-cols-2 gap-3 mt-2">
-            <button id="startBtn" class="bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white font-semibold py-3 px-4 rounded-xl shadow-lg transition duration-200">
-                Start Monitor
-            </button>
-            <button id="exportBtn" class="bg-slate-700 hover:bg-slate-600 active:bg-slate-800 text-white font-semibold py-3 px-4 rounded-xl shadow-lg transition duration-200 opacity-50 cursor-not-allowed" disabled>
-                Export CSV
+        <!-- Settings & Controls -->
+        <div class="glass-panel p-4 rounded-2xl mt-2">
+            
+            <!-- Timer Selection -->
+            <div class="flex justify-between items-center mb-4">
+                <label class="text-sm text-slate-300 font-medium">Auto-Stop Timer:</label>
+                <select id="timerSelect" class="bg-slate-800 text-white text-sm rounded-lg p-2 border border-slate-600 focus:outline-none focus:border-blue-500">
+                    <option value="0">Continuous (Manual Stop)</option>
+                    <option value="30">30 Seconds</option>
+                    <option value="60">1 Minute</option>
+                    <option value="120">2 Minutes</option>
+                    <option value="180">3 Minutes</option>
+                    <option value="300">5 Minutes</option>
+                </select>
+            </div>
+
+            <!-- Action Buttons -->
+            <div class="grid grid-cols-2 gap-3 mb-3">
+                <button id="startBtn" class="bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white font-semibold py-3 px-2 rounded-xl shadow-lg transition duration-200">
+                    Start Monitor
+                </button>
+                <button id="resetBtn" class="bg-slate-700 hover:bg-slate-600 active:bg-slate-800 text-white font-semibold py-3 px-2 rounded-xl shadow-lg transition duration-200 opacity-50 cursor-not-allowed" disabled>
+                    Reset Data
+                </button>
+            </div>
+            
+            <!-- Export Button -->
+            <button id="exportBtn" class="w-full bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white font-semibold py-3 px-4 rounded-xl shadow-lg transition duration-200 opacity-50 cursor-not-allowed" disabled>
+                Export CSV Report
             </button>
         </div>
 
         <!-- Technical Stats -->
-        <div class="text-center mt-4">
-            <p class="text-xs text-slate-500" id="techStats">Samples Collected: 0 | Buffer Size: 250</p>
+        <div class="text-center mt-2">
+            <p class="text-xs text-slate-500" id="techStats">Samples: 0 | Buffer: 0</p>
         </div>
     </main>
 
     <script>
         // --- State Management ---
         let isRecording = false;
-        let rawDataLog = []; // Stores data for CSV export
+        let rawDataLog = []; 
         const maxGraphPoints = 50; 
-        const rollingBuffer = 250; // Points used for RMS calc
+        const rollingBuffer = 250; 
         
         let bufferX = [];
         let bufferY = [];
@@ -91,6 +119,12 @@
         let sampleCount = 0;
         let lastUpdateTime = 0;
 
+        // Time Management Variables (Crucial for Pause/Resume)
+        let accumulatedTimeMs = 0; // Total time recorded so far
+        let sessionStartTime = 0;  // Unix timestamp of when "Start/Resume" was clicked
+        let timerIntervalUI = null;
+        let targetDurationMs = 0;
+
         // Constants for ISO 2631
         const kX = 1.4;
         const kY = 1.4;
@@ -98,7 +132,11 @@
 
         // --- DOM Elements ---
         const btnStart = document.getElementById('startBtn');
+        const btnReset = document.getElementById('resetBtn');
         const btnExport = document.getElementById('exportBtn');
+        const elTimer = document.getElementById('timerDisplay');
+        const timerSelect = document.getElementById('timerSelect');
+        
         const elA8 = document.getElementById('a8Value');
         const elDominant = document.getElementById('dominantAxis');
         const elRmsX = document.getElementById('rmsX');
@@ -137,7 +175,7 @@
             }
         });
 
-        // --- Message Box UI ---
+        // --- UI Helpers ---
         function showMessage(msg) {
             document.getElementById('messageText').innerText = msg;
             document.getElementById('messageBox').classList.remove('hide');
@@ -145,9 +183,16 @@
         function closeMessage() {
             document.getElementById('messageBox').classList.add('hide');
         }
+        
+        function formatTime(ms) {
+            let totalSeconds = Math.floor(ms / 1000);
+            let deciseconds = Math.floor((ms % 1000) / 100);
+            let minutes = Math.floor(totalSeconds / 60);
+            let seconds = totalSeconds % 60;
+            return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}.${deciseconds}`;
+        }
 
-        // --- Math Helpers ---
-        // Calculates RMS of an array, applying an optional K-factor
+        // Calculates RMS
         function calculateRMS(arr, kFactor) {
             if (arr.length === 0) return 0;
             const sumSq = arr.reduce((sum, val) => sum + (val * val), 0);
@@ -158,24 +203,25 @@
         function handleMotion(event) {
             if (!isRecording) return;
 
-            // Use linear acceleration (excludes gravity). 
-            // Fallback to accelerationIncludingGravity if linear is purely null, but warn user.
             let acc = event.acceleration;
             if (!acc || acc.x === null) {
                 acc = event.accelerationIncludingGravity;
-                // If still null, hardware doesn't support it
                 if (!acc || acc.x === null) return;
             }
+
+            // Calculate exact relative time to prevent huge gaps if user paused
+            const currentSessionTime = Date.now() - sessionStartTime;
+            const currentRelativeTimeMs = accumulatedTimeMs + currentSessionTime;
 
             const x = acc.x;
             const y = acc.y;
             const z = acc.z;
 
-            // 1. Add to raw data log for CSV (timestamp, x, y, z)
-            rawDataLog.push({ t: Date.now(), x, y, z });
+            // 1. Add to raw data log
+            rawDataLog.push({ t: currentRelativeTimeMs, x, y, z });
             sampleCount++;
 
-            // 2. Manage Rolling Buffer for RMS Calculation
+            // 2. Buffer Management
             bufferX.push(x);
             bufferY.push(y);
             bufferZ.push(z);
@@ -186,7 +232,7 @@
                 bufferZ.shift();
             }
 
-            // 3. Update Chart Data Arrays
+            // 3. Update Chart Arrays
             chart.data.datasets[0].data.push(x);
             chart.data.datasets[1].data.push(y);
             chart.data.datasets[2].data.push(z);
@@ -197,12 +243,35 @@
                 chart.data.datasets[2].data.shift();
             }
 
-            // 4. Throttle UI updates to ~10Hz to save battery and prevent DOM lag
+            // 4. Check Auto-Stop Timer
+            if (targetDurationMs > 0 && currentRelativeTimeMs >= targetDurationMs) {
+                toggleMonitor(); // Pause it automatically
+                showMessage(`Auto-Stop reached: ${targetDurationMs/1000} seconds completed.`);
+            }
+
+            // 5. Throttle Dashboard Updates
             const now = Date.now();
             if (now - lastUpdateTime > 100) {
                 updateDashboard();
                 chart.update();
                 lastUpdateTime = now;
+            }
+        }
+
+        // --- Timer UI Update ---
+        function updateTimerUI() {
+            if (!isRecording) return;
+            const currentSessionTime = Date.now() - sessionStartTime;
+            const currentRelativeTimeMs = accumulatedTimeMs + currentSessionTime;
+            
+            // If counting down
+            if (targetDurationMs > 0) {
+                let remaining = targetDurationMs - currentRelativeTimeMs;
+                if (remaining < 0) remaining = 0;
+                elTimer.innerText = formatTime(remaining);
+            } else {
+                // If counting up
+                elTimer.innerText = formatTime(currentRelativeTimeMs);
             }
         }
 
@@ -212,22 +281,23 @@
             const rmsY = calculateRMS(bufferY, kY);
             const rmsZ = calculateRMS(bufferZ, kZ);
 
-            // Update individual RMS readouts
             elRmsX.innerText = rmsX.toFixed(3);
             elRmsY.innerText = rmsY.toFixed(3);
             elRmsZ.innerText = rmsZ.toFixed(3);
 
-            // Find highest axis for A(8)
             const maxRms = Math.max(rmsX, rmsY, rmsZ);
             let domAxisName = "Z-Axis";
             if (maxRms === rmsX) domAxisName = "X-Axis";
             if (maxRms === rmsY) domAxisName = "Y-Axis";
 
             elA8.innerText = maxRms.toFixed(3);
-            elDominant.innerText = `Dominant: ${domAxisName}`;
-            elStats.innerText = `Samples Collected: ${sampleCount} | Buffer Size: ${bufferX.length}`;
+            if(isRecording) {
+                elDominant.innerText = `Dominant: ${domAxisName}`;
+            }
 
-            // Visual warning if action value is exceeded (0.5 m/s²)
+            elStats.innerText = `Samples: ${sampleCount} | Buffer: ${bufferX.length}`;
+
+            // Colors for limits
             if (maxRms > 0.5) {
                 elA8.classList.add('text-yellow-400');
                 elA8.classList.remove('text-white', 'text-red-500');
@@ -242,72 +312,118 @@
             }
         }
 
-        // --- Start/Stop Logic ---
+        // --- Start/Pause Logic ---
         async function toggleMonitor() {
             if (isRecording) {
-                // STOP RECORDING
+                // *** PAUSE LOGIC ***
                 isRecording = false;
-                window.removeEventListener('devicemotion', handleMotion);
-                btnStart.innerText = "Start Monitor";
+                window.removeEventListener('devicemotion', handleMotion, true);
+                clearInterval(timerIntervalUI);
+                
+                // Save accumulated time
+                accumulatedTimeMs += (Date.now() - sessionStartTime);
+                
+                // UI Changes
+                btnStart.innerText = "Resume Monitor";
                 btnStart.classList.replace('bg-red-600', 'bg-blue-600');
                 btnStart.classList.replace('hover:bg-red-500', 'hover:bg-blue-500');
                 statusDot.classList.replace('bg-green-500', 'bg-red-500');
                 statusDot.classList.replace('shadow-[0_0_8px_#22c55e]', 'shadow-[0_0_8px_#ef4444]');
                 elDominant.innerText = "Monitoring Paused";
+                timerSelect.disabled = false; // allow changing timer while paused
                 
-                // Enable Export button if we have data
+                // Enable Export and Reset buttons
                 if (rawDataLog.length > 0) {
                     btnExport.disabled = false;
                     btnExport.classList.remove('opacity-50', 'cursor-not-allowed');
+                    btnReset.disabled = false;
+                    btnReset.classList.remove('opacity-50', 'cursor-not-allowed');
                 }
             } else {
-                // REQUEST PERMISSION & START RECORDING
+                // *** START/RESUME LOGIC ***
                 if (typeof DeviceMotionEvent.requestPermission === 'function') {
                     try {
                         const permissionState = await DeviceMotionEvent.requestPermission();
                         if (permissionState === 'granted') {
                             startSensors();
                         } else {
-                            showMessage("Sensor permission denied. You must allow motion access to use this app.");
+                            showMessage("Sensor permission denied.");
                         }
                     } catch (error) {
-                        showMessage("Error requesting sensor access. Ensure you are on HTTPS.");
+                        showMessage("Error requesting sensor access. Ensure HTTPS.");
                     }
                 } else {
-                    // Non-iOS 13+ devices
                     if(window.DeviceMotionEvent) {
                          startSensors();
                     } else {
-                         showMessage("Device Motion API not supported on this browser/device.");
+                         showMessage("Device Motion API not supported.");
                     }
                 }
             }
         }
 
         function startSensors() {
-            // Reset buffers
-            bufferX = []; bufferY = []; bufferZ = [];
-            rawDataLog = [];
-            sampleCount = 0;
-            btnExport.disabled = true;
-            btnExport.classList.add('opacity-50', 'cursor-not-allowed');
-
             isRecording = true;
+            sessionStartTime = Date.now();
+            
+            // Get Target Duration
+            let secondsSelected = parseInt(timerSelect.value);
+            targetDurationMs = secondsSelected > 0 ? secondsSelected * 1000 : 0;
+            timerSelect.disabled = true; // Lock dropdown during recording
+
             window.addEventListener('devicemotion', handleMotion, true);
             
-            btnStart.innerText = "Stop Monitor";
+            // UI Changes
+            btnStart.innerText = "Pause Monitor";
             btnStart.classList.replace('bg-blue-600', 'bg-red-600');
             btnStart.classList.replace('hover:bg-blue-500', 'hover:bg-red-500');
             statusDot.classList.replace('bg-red-500', 'bg-green-500');
             statusDot.classList.replace('shadow-[0_0_8px_#ef4444]', 'shadow-[0_0_8px_#22c55e]');
             
-            // Check if data is actually coming in after 1 second
+            // Disable Export & Reset while recording
+            btnExport.disabled = true;
+            btnExport.classList.add('opacity-50', 'cursor-not-allowed');
+            btnReset.disabled = true;
+            btnReset.classList.add('opacity-50', 'cursor-not-allowed');
+
+            timerIntervalUI = setInterval(updateTimerUI, 100);
+            
             setTimeout(() => {
                 if(sampleCount === 0) {
-                    showMessage("Started, but no data received. Ensure you are on a mobile device and using a secure HTTPS connection.");
-                    toggleMonitor(); // Auto-stop
+                    showMessage("Started, but no data received. Check device sensors.");
+                    toggleMonitor(); 
                 }
-            }, 1000);
+            }, 1500);
+        }
+
+        // --- Reset Logic ---
+        function resetData() {
+            if (isRecording) return; // Prevent reset while running
+            
+            if (confirm("Are you sure you want to clear all recorded data? This cannot be undone.")) {
+                bufferX = []; bufferY = []; bufferZ = [];
+                rawDataLog = [];
+                sampleCount = 0;
+                accumulatedTimeMs = 0;
+                lastUpdateTime = 0;
+                targetDurationMs = 0;
+
+                // Clear Chart
+                chart.data.datasets.forEach(ds => ds.data = Array(maxGraphPoints).fill(0));
+                chart.update();
+
+                // Reset UI
+                updateDashboard();
+                elTimer.innerText = "00:00.0";
+                btnStart.innerText = "Start Monitor";
+                elDominant.innerText = "Monitoring Stopped";
+                
+                // Disable Export and Reset again
+                btnExport.disabled = true;
+                btnExport.classList.add('opacity-50', 'cursor-not-allowed');
+                btnReset.disabled = true;
+                btnReset.classList.add('opacity-50', 'cursor-not-allowed');
+            }
         }
 
         // --- Export to CSV ---
@@ -318,7 +434,8 @@
             csvContent += "Timestamp(ms),X_Acc(m/s2),Y_Acc(m/s2),Z_Acc(m/s2)\n";
             
             rawDataLog.forEach(row => {
-                csvContent += `${row.t},${row.x},${row.y},${row.z}\n`;
+                // Ensure no trailing decimals on timestamps
+                csvContent += `${Math.round(row.t)},${row.x.toFixed(4)},${row.y.toFixed(4)},${row.z.toFixed(4)}\n`;
             });
 
             const encodedUri = encodeURI(csvContent);
@@ -332,6 +449,7 @@
 
         // --- Event Listeners ---
         btnStart.addEventListener('click', toggleMonitor);
+        btnReset.addEventListener('click', resetData);
         btnExport.addEventListener('click', exportCSV);
 
     </script>

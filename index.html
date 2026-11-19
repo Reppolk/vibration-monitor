@@ -70,6 +70,17 @@
         <!-- Settings & Controls -->
         <div class="glass-panel p-4 rounded-2xl mt-2">
             
+            <!-- Start Delay Selection -->
+            <div class="flex justify-between items-center mb-3">
+                <label class="text-sm text-slate-300 font-medium">Start Delay:</label>
+                <select id="delaySelect" class="bg-slate-800 text-white text-sm rounded-lg p-2 border border-slate-600 focus:outline-none focus:border-blue-500">
+                    <option value="0">No Delay (Immediate)</option>
+                    <option value="5" selected>5 Seconds</option>
+                    <option value="10">10 Seconds</option>
+                    <option value="15">15 Seconds</option>
+                </select>
+            </div>
+
             <!-- Timer Selection -->
             <div class="flex justify-between items-center mb-4">
                 <label class="text-sm text-slate-300 font-medium">Auto-Stop Timer:</label>
@@ -125,6 +136,11 @@
         let timerIntervalUI = null;
         let targetDurationMs = 0;
 
+        // Start Delay Variables
+        let isCountingDown = false;
+        let countdownInterval = null;
+        let audioCtx = null;
+
         // Constants for ISO 2631
         const kX = 1.4;
         const kY = 1.4;
@@ -136,6 +152,7 @@
         const btnExport = document.getElementById('exportBtn');
         const elTimer = document.getElementById('timerDisplay');
         const timerSelect = document.getElementById('timerSelect');
+        const delaySelect = document.getElementById('delaySelect');
         
         const elA8 = document.getElementById('a8Value');
         const elDominant = document.getElementById('dominantAxis');
@@ -182,6 +199,39 @@
         }
         function closeMessage() {
             document.getElementById('messageBox').classList.add('hide');
+        }
+
+        // Audio cue helper so you can hear start/stop when the tablet is face-down
+        function initAudio() {
+            try {
+                if (!audioCtx) {
+                    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+                    if (AudioContextClass) audioCtx = new AudioContextClass();
+                }
+                if (audioCtx && audioCtx.state === 'suspended') {
+                    audioCtx.resume();
+                }
+            } catch (e) {
+                // Ignore audio errors on restricted devices
+            }
+        }
+
+        function playBeep(frequency = 600, durationMs = 120) {
+            try {
+                if (!audioCtx) return;
+                const oscillator = audioCtx.createOscillator();
+                const gainNode = audioCtx.createGain();
+                oscillator.type = 'sine';
+                oscillator.frequency.setValueAtTime(frequency, audioCtx.currentTime);
+                gainNode.gain.setValueAtTime(0.15, audioCtx.currentTime);
+                gainNode.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + durationMs / 1000);
+                oscillator.connect(gainNode);
+                gainNode.connect(audioCtx.destination);
+                oscillator.start();
+                oscillator.stop(audioCtx.currentTime + durationMs / 1000);
+            } catch (e) {
+                // Ignore audio errors
+            }
         }
         
         function formatTime(ms) {
@@ -246,6 +296,8 @@
             // 4. Check Auto-Stop Timer
             if (targetDurationMs > 0 && currentRelativeTimeMs >= targetDurationMs) {
                 toggleMonitor(); // Pause it automatically
+                playBeep(520, 150);
+                setTimeout(() => playBeep(400, 300), 180);
                 showMessage(`Auto-Stop reached: ${targetDurationMs/1000} seconds completed.`);
             }
 
@@ -314,6 +366,15 @@
 
         // --- Start/Pause Logic ---
         async function toggleMonitor() {
+            // Initialize audio on direct user interaction
+            initAudio();
+
+            if (isCountingDown) {
+                // *** CANCEL COUNTDOWN LOGIC ***
+                cancelCountdown();
+                return;
+            }
+
             if (isRecording) {
                 // *** PAUSE LOGIC ***
                 isRecording = false;
@@ -325,12 +386,13 @@
                 
                 // UI Changes
                 btnStart.innerText = "Resume Monitor";
-                btnStart.classList.replace('bg-red-600', 'bg-blue-600');
-                btnStart.classList.replace('hover:bg-red-500', 'hover:bg-blue-500');
-                statusDot.classList.replace('bg-green-500', 'bg-red-500');
-                statusDot.classList.replace('shadow-[0_0_8px_#22c55e]', 'shadow-[0_0_8px_#ef4444]');
+                btnStart.classList.remove('bg-red-600', 'hover:bg-red-500', 'bg-amber-600', 'hover:bg-amber-500');
+                btnStart.classList.add('bg-blue-600', 'hover:bg-blue-500');
+                statusDot.classList.remove('bg-green-500', 'shadow-[0_0_8px_#22c55e]', 'bg-amber-400', 'shadow-[0_0_8px_#fbbf24]', 'animate-pulse');
+                statusDot.classList.add('bg-red-500', 'shadow-[0_0_8px_#ef4444]');
                 elDominant.innerText = "Monitoring Paused";
                 timerSelect.disabled = false; // allow changing timer while paused
+                delaySelect.disabled = false; // allow changing delay while paused
                 
                 // Enable Export and Reset buttons
                 if (rawDataLog.length > 0) {
@@ -345,7 +407,7 @@
                     try {
                         const permissionState = await DeviceMotionEvent.requestPermission();
                         if (permissionState === 'granted') {
-                            startSensors();
+                            initiateStart();
                         } else {
                             showMessage("Sensor permission denied.");
                         }
@@ -353,12 +415,83 @@
                         showMessage("Error requesting sensor access. Ensure HTTPS.");
                     }
                 } else {
-                    if(window.DeviceMotionEvent) {
-                         startSensors();
+                    if (window.DeviceMotionEvent) {
+                        initiateStart();
                     } else {
-                         showMessage("Device Motion API not supported.");
+                        showMessage("Device Motion API not supported.");
                     }
                 }
+            }
+        }
+
+        function initiateStart() {
+            const delaySeconds = parseInt(delaySelect.value, 10) || 0;
+            if (delaySeconds > 0) {
+                startCountdown(delaySeconds);
+            } else {
+                startSensors();
+            }
+        }
+
+        function startCountdown(seconds) {
+            isCountingDown = true;
+            let remaining = seconds;
+
+            // Lock dropdowns and secondary buttons during countdown
+            timerSelect.disabled = true;
+            delaySelect.disabled = true;
+            btnExport.disabled = true;
+            btnExport.classList.add('opacity-50', 'cursor-not-allowed');
+            btnReset.disabled = true;
+            btnReset.classList.add('opacity-50', 'cursor-not-allowed');
+
+            // Update UI to amber countdown state
+            btnStart.innerText = `Cancel (${remaining}s)`;
+            btnStart.classList.remove('bg-blue-600', 'hover:bg-blue-500', 'bg-red-600', 'hover:bg-red-500');
+            btnStart.classList.add('bg-amber-600', 'hover:bg-amber-500');
+            statusDot.classList.remove('bg-red-500', 'shadow-[0_0_8px_#ef4444]', 'bg-green-500', 'shadow-[0_0_8px_#22c55e]');
+            statusDot.classList.add('bg-amber-400', 'shadow-[0_0_8px_#fbbf24]', 'animate-pulse');
+            elDominant.innerText = `Position tablet — starting in ${remaining}s...`;
+            playBeep(500, 80);
+
+            countdownInterval = setInterval(() => {
+                remaining--;
+                if (remaining > 0) {
+                    btnStart.innerText = `Cancel (${remaining}s)`;
+                    elDominant.innerText = `Position tablet — starting in ${remaining}s...`;
+                    // Beep on the last 3 seconds as a cue
+                    if (remaining <= 3) playBeep(600, 80);
+                } else {
+                    clearInterval(countdownInterval);
+                    countdownInterval = null;
+                    isCountingDown = false;
+                    playBeep(950, 250); // Higher, longer beep to confirm recording started
+                    startSensors();
+                }
+            }, 1000);
+        }
+
+        function cancelCountdown() {
+            if (countdownInterval) {
+                clearInterval(countdownInterval);
+                countdownInterval = null;
+            }
+            isCountingDown = false;
+
+            btnStart.innerText = rawDataLog.length > 0 ? "Resume Monitor" : "Start Monitor";
+            btnStart.classList.remove('bg-amber-600', 'hover:bg-amber-500', 'bg-red-600', 'hover:bg-red-500');
+            btnStart.classList.add('bg-blue-600', 'hover:bg-blue-500');
+            statusDot.classList.remove('bg-amber-400', 'shadow-[0_0_8px_#fbbf24]', 'animate-pulse', 'bg-green-500', 'shadow-[0_0_8px_#22c55e]');
+            statusDot.classList.add('bg-red-500', 'shadow-[0_0_8px_#ef4444]');
+            elDominant.innerText = rawDataLog.length > 0 ? "Monitoring Paused" : "Monitoring Stopped";
+
+            timerSelect.disabled = false;
+            delaySelect.disabled = false;
+            if (rawDataLog.length > 0) {
+                btnExport.disabled = false;
+                btnExport.classList.remove('opacity-50', 'cursor-not-allowed');
+                btnReset.disabled = false;
+                btnReset.classList.remove('opacity-50', 'cursor-not-allowed');
             }
         }
 
@@ -370,15 +503,16 @@
             let secondsSelected = parseInt(timerSelect.value);
             targetDurationMs = secondsSelected > 0 ? secondsSelected * 1000 : 0;
             timerSelect.disabled = true; // Lock dropdown during recording
+            delaySelect.disabled = true; // Lock delay dropdown during recording
 
             window.addEventListener('devicemotion', handleMotion, true);
             
             // UI Changes
             btnStart.innerText = "Pause Monitor";
-            btnStart.classList.replace('bg-blue-600', 'bg-red-600');
-            btnStart.classList.replace('hover:bg-blue-500', 'hover:bg-red-500');
-            statusDot.classList.replace('bg-red-500', 'bg-green-500');
-            statusDot.classList.replace('shadow-[0_0_8px_#ef4444]', 'shadow-[0_0_8px_#22c55e]');
+            btnStart.classList.remove('bg-blue-600', 'hover:bg-blue-500', 'bg-amber-600', 'hover:bg-amber-500');
+            btnStart.classList.add('bg-red-600', 'hover:bg-red-500');
+            statusDot.classList.remove('bg-red-500', 'shadow-[0_0_8px_#ef4444]', 'bg-amber-400', 'shadow-[0_0_8px_#fbbf24]', 'animate-pulse');
+            statusDot.classList.add('bg-green-500', 'shadow-[0_0_8px_#22c55e]');
             
             // Disable Export & Reset while recording
             btnExport.disabled = true;
@@ -389,7 +523,7 @@
             timerIntervalUI = setInterval(updateTimerUI, 100);
             
             setTimeout(() => {
-                if(sampleCount === 0) {
+                if(sampleCount === 0 && isRecording) {
                     showMessage("Started, but no data received. Check device sensors.");
                     toggleMonitor(); 
                 }
